@@ -1,0 +1,4 @@
+/sluice
+/sluice_bin
+node_modules/
+*.log

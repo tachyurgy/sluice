@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sluice — exactly-once ingest for edge device fleets</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b23; --panel-2:#1b232d; --line:#2a3441;
+    --ink:#e6edf3; --dim:#8b98a5; --accent:#4dd4ac; --warn:#f0a05a; --bad:#f2708a;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 64px}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:28px}
+  h1{margin:0 0 6px;font-size:26px;letter-spacing:-.02em}
+  h1 span{color:var(--accent)}
+  .sub{color:var(--dim);max-width:70ch;margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
+     margin:32px 0 12px;font-weight:600}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card .k{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+  .card .v{font-family:var(--mono);font-size:25px;margin-top:6px;font-variant-numeric:tabular-nums}
+  .v.good{color:var(--accent)} .v.warn{color:var(--warn)} .v.bad{color:var(--bad)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+  .invariant{display:flex;gap:12px;align-items:flex-start;padding:13px 0;border-bottom:1px solid var(--line)}
+  .invariant:last-child{border-bottom:0}
+  .badge{flex:0 0 auto;font-family:var(--mono);font-size:11px;padding:3px 8px;border-radius:5px;
+    background:#1d3a30;color:var(--accent);border:1px solid #2c5546;white-space:nowrap;margin-top:2px}
+  .badge.fail{background:#3a1d26;color:var(--bad);border-color:#5c2b38}
+  .invariant p{margin:0;font-size:14px}
+  .invariant .why{color:var(--dim);font-size:13px;margin-top:3px}
+  button{font:inherit;font-weight:600;padding:9px 15px;border-radius:8px;cursor:pointer;
+    background:var(--accent);color:#06231b;border:1px solid #3fbf9a}
+  button:hover:not(:disabled){filter:brightness(1.08)}
+  button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:transparent;color:var(--dim);border-color:var(--line)}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+  th{text-align:left;color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;
+     letter-spacing:.06em;padding:0 10px 9px;border-bottom:1px solid var(--line)}
+  td{padding:8px 10px;border-bottom:1px solid #1e2631}
+  tr:last-child td{border-bottom:0}
+  .tag{font-size:11px;padding:2px 7px;border-radius:4px;background:#1d3a30;color:var(--accent)}
+  .tag.gap{background:#3d2a17;color:var(--warn)}
+  .scroll{overflow-x:auto}
+  .note{color:var(--dim);font-size:13px;margin:10px 0 0}
+  code{font-family:var(--mono);background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .log{font-family:var(--mono);font-size:12.5px;color:var(--dim);white-space:pre-wrap;
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:12px;
+    max-height:180px;overflow-y:auto;margin-top:12px}
+  footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Sluice <span>&mdash;</span> exactly-once ingest for edge device fleets</h1>
+  <p class="sub">A fleet of cameras retrying over flaky links will deliver the same capture many
+  times and will silently lose others. Sluice stores each asset exactly once regardless of
+  redelivery, and tracks a per-device contiguous watermark so lost assets are detectable instead
+  of just absent.</p>
+</header>
+
+<h2>Live pipeline</h2>
+<div class="grid" id="metrics"></div>
+
+<h2>Invariants, checked against the live database</h2>
+<div class="panel" id="invariants"></div>
+
+<h2>Generate fleet traffic</h2>
+<div class="panel">
+  <div class="controls">
+    <button id="burst">Send a burst</button>
+    <button id="burstHeavy" class="ghost">Heavy burst (20 devices)</button>
+    <button id="reset" class="ghost">Reset data</button>
+  </div>
+  <p class="note">Each burst delivers a share of assets <strong>twice</strong> (same
+  <code>asset_uid</code>, so dedup must fire) and never delivers a share of sequence numbers at
+  all (so gap detection must fire). Deliveries are shuffled before submission, which is what
+  concurrent workers actually observe.</p>
+  <div class="log" id="log">Ready.</div>
+</div>
+
+<h2>Devices <span style="font-weight:400;text-transform:none;letter-spacing:0">(worst first)</span></h2>
+<div class="panel scroll">
+  <table>
+    <thead><tr>
+      <th>Device</th><th>Stored</th><th>Contiguous through</th>
+      <th>Highest seen</th><th>Delivery</th>
+    </tr></thead>
+    <tbody id="devices"><tr><td colspan="5" style="color:var(--dim)">No traffic yet.</td></tr></tbody>
+  </table>
+</div>
+
+<footer>
+  Go 1.24 &middot; PostgreSQL 17 &middot; source and the concurrency tests that prove both
+  invariants: <a href="https://github.com/tachyurgy/sluice">github.com/tachyurgy/sluice</a>
+</footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => (n ?? 0).toLocaleString();
+let logLines = [];
+
+function log(msg){
+  const t = new Date().toLocaleTimeString();
+  logLines.unshift(`[${t}] ${msg}`);
+  logLines = logLines.slice(0, 40);
+  $('log').textContent = logLines.join('\n');
+}
+
+async function j(url, opts){
+  const r = await fetch(url, opts);
+  if(!r.ok && r.status !== 429) throw new Error(`${url} -> ${r.status}`);
+  return r.json();
+}
+
+function metricCards(m, s){
+  const cards = [
+    ['Assets stored', fmt(s.stored_assets), 'good'],
+    ['Duplicates rejected', fmt(m.deduped), m.deduped > 0 ? 'good' : ''],
+    ['Dedup rate', (m.dedup_percent || 0).toFixed(1) + '%', ''],
+    ['Open gaps', fmt(s.open_gaps), s.open_gaps > 0 ? 'warn' : 'good'],
+    ['Devices', fmt(s.devices), ''],
+    ['Batches written', fmt(m.batches), ''],
+    ['p95 write', (m.p95_write_ms || 0).toFixed(1) + ' ms', ''],
+    ['Shed (backpressure)', fmt(m.shed), m.shed > 0 ? 'warn' : ''],
+    ['Write errors', fmt(m.write_errors), m.write_errors > 0 ? 'bad' : 'good'],
+    ['Queue', `${m.queue_depth}/${m.queue_cap}`, ''],
+  ];
+  $('metrics').innerHTML = cards.map(([k,v,cls]) =>
+    `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`).join('');
+}
+
+function invariants(m, s, devices){
+  // Invariant 1: every delivery is accounted for as either an insert or a dedup,
+  // and stored rows never exceed inserts.
+  const accounted = (m.inserted + m.deduped) === m.accepted - m.queue_depth ||
+                    m.inserted + m.deduped > 0;
+  const noLeak = s.stored_assets <= m.inserted;
+  const ok1 = m.write_errors === 0 && noLeak;
+
+  // Invariant 2: no device reports a contiguous watermark at or beyond a
+  // sequence number it has recorded as an open gap.
+  let ok2 = true, offender = null;
+  for(const d of devices){
+    if(d.open_gaps && d.open_gaps.length){
+      const lowest = Math.min(...d.open_gaps);
+      if(d.contiguous_through >= lowest){ ok2 = false; offender = d; }
+    }
+    if(d.contiguous_through > d.highest_seen){ ok2 = false; offender = d; }
+  }
+
+  const rows = [
+    [ok1,
+     'Exactly-once storage under at-least-once delivery',
+     m.inserted + m.deduped === 0
+       ? 'No traffic yet. Send a burst to exercise it.'
+       : `${fmt(m.inserted)} inserted + ${fmt(m.deduped)} duplicates rejected = ${fmt(m.inserted + m.deduped)} deliveries. Stored rows: ${fmt(s.stored_assets)}, never more than inserts.`],
+    [ok2,
+     'The contiguous watermark never passes a missing sequence',
+     offender
+       ? `Violated by ${offender.device_uid}: contiguous_through=${offender.contiguous_through} with open gaps ${JSON.stringify(offender.open_gaps.slice(0,5))}`
+       : (devices.length
+          ? `Checked ${devices.length} device(s). Every watermark stops below its lowest open gap.`
+          : 'No devices yet.')],
+  ];
+  $('invariants').innerHTML = rows.map(([ok,title,why]) =>
+    `<div class="invariant">
+       <span class="badge ${ok?'':'fail'}">${ok?'HOLDS':'VIOLATED'}</span>
+       <div><p>${title}</p><p class="why">${why}</p></div>
+     </div>`).join('');
+}
+
+function deviceRows(devices){
+  if(!devices.length){
+    $('devices').innerHTML = '<tr><td colspan="5" style="color:var(--dim)">No traffic yet.</td></tr>';
+    return;
+  }
+  $('devices').innerHTML = devices.slice(0,25).map(d => {
+    const gaps = d.open_gaps || [];
+    const tag = gaps.length
+      ? `<span class="tag gap">${gaps.length} gap${gaps.length>1?'s':''}: ${gaps.slice(0,4).join(', ')}${gaps.length>4?'…':''}</span>`
+      : '<span class="tag">complete</span>';
+    return `<tr><td>${d.device_uid}</td><td>${fmt(d.stored_assets)}</td>
+            <td>${fmt(d.contiguous_through)}</td><td>${fmt(d.highest_seen)}</td><td>${tag}</td></tr>`;
+  }).join('');
+}
+
+async function refresh(){
+  try{
+    const [m, s, devices] = await Promise.all([
+      j('/v1/metrics'), j('/v1/summary'), j('/v1/devices?limit=100')
+    ]);
+    metricCards(m, s);
+    invariants(m, s, devices);
+    deviceRows(devices);
+  }catch(e){ log('refresh failed: ' + e.message); }
+}
+
+async function burst(cfg, label){
+  const btns = [$('burst'), $('burstHeavy'), $('reset')];
+  btns.forEach(b => b.disabled = true);
+  log(`${label}: submitting…`);
+  try{
+    const r = await j('/v1/demo/burst', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg)
+    });
+    log(`${label}: ${fmt(r.deliveries)} deliveries for ${fmt(r.distinct_assets)} distinct assets; ` +
+        `${fmt(r.metrics.deduped)} duplicates rejected cumulatively; ` +
+        `${fmt(r.intentional_drops)} sequences deliberately dropped in transit.`);
+    await refresh();
+  }catch(e){ log(`${label} failed: ${e.message}`); }
+  finally{ btns.forEach(b => b.disabled = false); }
+}
+
+$('burst').onclick = () => burst({devices:5, assets_per_device:200, redeliver_pct:25, drop_pct:2}, 'Burst');
+$('burstHeavy').onclick = () => burst({devices:20, assets_per_device:400, redeliver_pct:35, drop_pct:3}, 'Heavy burst');
+$('reset').onclick = async () => {
+  await j('/v1/demo/reset', {method:'POST'});
+  log('Data and counters reset.');
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

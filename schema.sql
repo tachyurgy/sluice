@@ -1,0 +1,1 @@
+internal/store/ddl/schema.sql
